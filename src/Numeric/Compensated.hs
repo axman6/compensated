@@ -1,13 +1,14 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE DeriveDataTypeable    #-}
+{-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE MultiWayIf            #-}
+{-# LANGUAGE PatternGuards         #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE StandaloneDeriving    #-}
+{-# LANGUAGE Trustworthy           #-}
+{-# LANGUAGE TypeFamilies          #-}
 
 #ifndef MIN_VERSION_vector
 #define MIN_VERSION_vector(x,y,z) 1
@@ -58,29 +59,29 @@ module Numeric.Compensated
   ) where
 
 #if __GLASGOW_HASKELL__ < 710
-import Control.Applicative
+import           Control.Applicative
 #endif
-import Control.Lens as L
-import Control.DeepSeq
-import Control.Monad
-import Data.Binary as Binary
-import Data.Data
-import Data.Foldable as Foldable
-import Data.Function (on)
-import Data.Hashable
-import Data.Ratio
-import Data.SafeCopy
-import Data.Serialize as Serialize
-import Data.Bytes.Serial as Bytes
-import Data.Semigroup
-import Data.Vector.Unboxed as U
-import Data.Vector.Generic as G
-import Data.Vector.Generic.Mutable as M
-import Foreign.Ptr
-import Foreign.Storable
-import Numeric.Log
-import Text.Read as T
-import Text.Show as T
+import           Control.DeepSeq
+import           Control.Lens                as L
+import           Control.Monad
+import           Data.Binary                 as Binary
+import           Data.Bytes.Serial           as Bytes
+import           Data.Data
+import           Data.Foldable               as Foldable
+import           Data.Function               (on)
+import           Data.Hashable
+import           Data.Ratio
+import           Data.SafeCopy
+import           Data.Semigroup
+import           Data.Serialize              as Serialize
+import           Data.Vector.Generic         as G
+import           Data.Vector.Generic.Mutable as M
+import           Data.Vector.Unboxed         as U
+import           Foreign.Ptr
+import           Foreign.Storable
+import           Numeric.Log
+import           Text.Read                   as T
+import           Text.Show                   as T
 
 -- $setup
 -- >>> :load Numeric.Compensated
@@ -238,6 +239,97 @@ instance Compensable Double where
   {-# INLINE compensated #-}
   magic = 134217729
   {-# INLINE magic #-}
+
+mul_pwr2_d :: Compensated Double -> Double -> Compensated Double
+mul_pwr2_d a b = with a $ on compensated (*b)
+
+log2_d :: Compensated Double
+log2_d = CD 6.931471805599452862e-01 2.319046813846299558e-17
+
+e_d :: Compensated Double
+e_d = CD 2.718281828459045091e+00 1.445646891729250158e-16
+
+inf_d :: Compensated Double
+inf_d = CD (1/0) (1/0)
+
+floor_d :: Compensated Double -> Compensated Double
+floor_d a = with a $ \x y -> let
+  hi_f = fromIntegral $ floor x
+  in if x == hi_f
+    then let lo = fromIntegral $ floor y in fadd hi_f lo compensated
+    else compensated hi_f 0.0
+
+inv_fact_d :: U.Vector (Compensated Double)
+inv_fact_d =
+  [ CD 1.66666666666666657e-01 ( 9.25185853854297066e-18)
+  , CD 4.16666666666666644e-02 ( 2.31296463463574266e-18)
+  , CD 8.33333333333333322e-03 ( 1.15648231731787138e-19)
+  , CD 1.38888888888888894e-03 (-5.30054395437357706e-20)
+  , CD 1.98412698412698413e-04 ( 1.72095582934207053e-22)
+  , CD 2.48015873015873016e-05 ( 2.15119478667758816e-23)
+  , CD 2.75573192239858925e-06 (-1.85839327404647208e-22)
+  , CD 2.75573192239858883e-07 ( 2.37677146222502973e-23)
+  , CD 2.50521083854417202e-08 (-1.44881407093591197e-24)
+  , CD 2.08767569878681002e-09 (-1.20734505911325997e-25)
+  , CD 1.60590438368216133e-10 ( 1.25852945887520981e-26)
+  , CD 1.14707455977297245e-11 ( 2.06555127528307454e-28)
+  , CD 7.64716373181981641e-13 ( 7.03872877733453001e-30)
+  , CD 4.77947733238738525e-14 ( 4.39920548583408126e-31)
+  , CD 2.81145725434552060e-15 ( 1.65088427308614326e-3 )
+  ]
+
+eps_d :: Double
+eps_d = 4.93038065763132e-32
+
+ldexp_d a e = with a $ on compensated scaleFloat
+
+type CD = Compensated Double
+
+exp_d :: Compensated Double -> Compensated Double
+exp_d a =
+  let
+    k = 512.0
+    inv_k = 1.0/k
+  in with a $ \x y ->
+    if | x <= -709.0 -> 0.0
+       | x >=  709.0 -> 1/0 -- Pos infinity
+       | a == 0      -> 1.0
+       | a == 1.0    -> e
+       | otherwise -> let
+          m = floor_d (x / uncompensated log2_d + 0.5)
+          r = mul_pwr2_d (a - log2_d * m)
+
+          itr :: (CD -> CD -> CD -> CD -> Int -> CD) -> CD -> CD -> CD -> CD -> Int -> CD
+          itr k s t p r i = let
+            s' = s + t
+            p' = p * r
+            i' = i + 1
+            t' = p' * inv_fact_d U.! i
+            in if abs (uncompensated t) > inv_k * eps_d
+              then k s' t' p' r' i'
+              else final k s' t' p' r'
+
+
+          final :: CD -> CD -> CD -> CD -> Int -> CD
+          final s t p r _ = let
+                !s0 = s' + t
+                !s1 = mul_pwr2_d s0 2 + square s0
+                !s2 = mul_pwr2_d s1 2 + square s1
+                !s3 = mul_pwr2_d s2 2 + square s2
+                !s4 = mul_pwr2_d s3 2 + square s3
+                !s5 = mul_pwr2_d s4 2 + square s4
+                !s6 = mul_pwr2_d s5 2 + square s5
+                !s7 = mul_pwr2_d s6 2 + square s6
+                !s8 = mul_pwr2_d s7 2 + square s7
+                !s9 = mul_pwr2_d s8 2 + square s8
+                !s10 = s9 + 1
+                in ldexp_d s (truncate m)
+
+          p' = square r
+          s = r + mul_pwr2_d p' 0.5
+          p = p' * r
+          t = p * inv_fact_d U.! 0
+          in itr (itr (itr (itr final))) s t p r 0
 
 instance Compensable Float where
   data Compensated Float = CF {-# UNPACK #-} !Float {-# UNPACK #-} !Float
