@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE MultiWayIf            #-}
+{-# LANGUAGE OverloadedLists       #-}
 {-# LANGUAGE PatternGuards         #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE StandaloneDeriving    #-}
@@ -56,6 +57,7 @@ module Numeric.Compensated
   , kahan, (+^), (*^)
   -- * compensated operators
   , square
+  , exp_d
   ) where
 
 #if __GLASGOW_HASKELL__ < 710
@@ -86,8 +88,8 @@ import           Text.Show                   as T
 -- $setup
 -- >>> :load Numeric.Compensated
 
-{-# ANN module "hlint: ignore Use -" #-}
-{-# ANN module "hlint: ignore Use curry" #-}
+-- {-# ANN module "hlint: ignore Use -" #-}
+-- {-# ANN module "hlint: ignore Use curry" #-}
 
 -- | @'add' a b k@ computes @k x y@ such that
 --
@@ -254,9 +256,9 @@ inf_d = CD (1/0) (1/0)
 
 floor_d :: Compensated Double -> Compensated Double
 floor_d a = with a $ \x y -> let
-  hi_f = fromIntegral $ floor x
+  hi_f = fromIntegral $ (floor x :: Int)
   in if x == hi_f
-    then let lo = fromIntegral $ floor y in fadd hi_f lo compensated
+    then let lo = fromIntegral $ (floor y :: Int) in fadd hi_f lo compensated
     else compensated hi_f 0.0
 
 inv_fact_d :: U.Vector (Compensated Double)
@@ -281,7 +283,8 @@ inv_fact_d =
 eps_d :: Double
 eps_d = 4.93038065763132e-32
 
-ldexp_d a e = with a $ on compensated scaleFloat
+ldexp_d :: Compensated Double -> Int -> Compensated Double
+ldexp_d a e = with a $ on compensated (scaleFloat e)
 
 type CD = Compensated Double
 
@@ -290,29 +293,29 @@ exp_d a =
   let
     k = 512.0
     inv_k = 1.0/k
-  in with a $ \x y ->
-    if | x <= -709.0 -> 0.0
-       | x >=  709.0 -> 1/0 -- Pos infinity
-       | a == 0      -> 1.0
-       | a == 1.0    -> e
-       | otherwise -> let
-          m = floor_d (x / uncompensated log2_d + 0.5)
-          r = mul_pwr2_d (a - log2_d * m)
+    a0 = uncompensated a
+  in if | a0 <= -709.0 -> 0.0
+        | a0 >=  709.0 -> inf_d
+        | a == 0      -> 1.0
+        | a == 1.0    -> e_d
+        | otherwise -> with a $ \x _y -> let
+          m = floor (x / uncompensated log2_d + 0.5) :: Int
+          r = mul_pwr2_d (a - log2_d * fromIntegral m) inv_k
 
-          itr :: (CD -> CD -> CD -> CD -> Int -> CD) -> CD -> CD -> CD -> CD -> Int -> CD
-          itr k s t p r i = let
+          itr :: (CD -> CD -> CD -> Int -> CD) -> CD -> CD -> CD -> Int -> CD
+          itr cont s t p i = let
             s' = s + t
             p' = p * r
             i' = i + 1
             t' = p' * inv_fact_d U.! i
             in if abs (uncompensated t) > inv_k * eps_d
-              then k s' t' p' r' i'
-              else final k s' t' p' r'
+              then cont s' t' p' i'
+              else final s' t' p' i'
 
 
-          final :: CD -> CD -> CD -> CD -> Int -> CD
-          final s t p r _ = let
-                !s0 = s' + t
+          final :: CD -> CD -> CD -> Int -> CD
+          final s t _ _ = let
+                !s0 = s + t
                 !s1 = mul_pwr2_d s0 2 + square s0
                 !s2 = mul_pwr2_d s1 2 + square s1
                 !s3 = mul_pwr2_d s2 2 + square s2
@@ -323,13 +326,13 @@ exp_d a =
                 !s8 = mul_pwr2_d s7 2 + square s7
                 !s9 = mul_pwr2_d s8 2 + square s8
                 !s10 = s9 + 1
-                in ldexp_d s (truncate m)
+                in ldexp_d s10 m
 
-          p' = square r
-          s = r + mul_pwr2_d p' 0.5
-          p = p' * r
-          t = p * inv_fact_d U.! 0
-          in itr (itr (itr (itr final))) s t p r 0
+          pinit' = square r
+          sinit = r + mul_pwr2_d pinit' 0.5
+          pinit = pinit' * r
+          tinit = pinit * inv_fact_d U.! 0
+          in itr (itr (itr (itr final))) sinit tinit pinit 1
 
 instance Compensable Float where
   data Compensated Float = CF {-# UNPACK #-} !Float {-# UNPACK #-} !Float
@@ -634,6 +637,8 @@ instance (Compensable a, Storable a) => Storable (Compensated a) where
 
 newtype instance U.MVector s (Compensated a) = MV_Compensated (U.MVector s (a,a))
 newtype instance U.Vector (Compensated a) = V_Compensated (U.Vector (a, a))
+
+instance (Unbox a, Compensable a) => Unbox (Compensated a)
 
 instance (Compensable a, Unbox a) => M.MVector U.MVector (Compensated a) where
   basicLength (MV_Compensated v) = M.basicLength v
